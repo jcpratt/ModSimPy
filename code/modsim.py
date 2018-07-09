@@ -142,9 +142,10 @@ def linrange(start=0, stop=None, step=1, **options):
     This function works best if the space between start and stop
     is divisible by step; otherwise the results might be surprising.
 
-    By default, the last value in the array is `stop` (at least approximately).
-    If you provide the keyword argument `endpoint=False`, the last value
-    in the array is `stop-step`.
+    By default, the last value in the array is `stop-step`
+    (at least approximately).
+    If you provide the keyword argument `endpoint=True`,
+    the last value in the array is `stop`.
 
     start: first value
     stop: last value
@@ -161,7 +162,7 @@ def linrange(start=0, stop=None, step=1, **options):
 
     # TODO: what breaks if we don't make the dtype float?
     #underride(options, endpoint=True, dtype=np.float64)
-    underride(options, endpoint=True)
+    underride(options, endpoint=False)
 
     # see if any of the arguments has units
     units = getattr(start, 'units', None)
@@ -197,29 +198,24 @@ def fit_leastsq(error_func, params, data, **options):
 
     # run leastsq
     #TODO: do we need to turn units off?
-    best_params, _, _, mesg, ier = leastsq(error_func, x0=params,
+    best_params, cov_x, infodict, mesg, ier = leastsq(error_func, x0=params,
                                            args=args, **options)
 
-    #TODO: check why logging.info is not visible
+    details = ModSimSeries(infodict)
+    details.set(cov_x=cov_x, mesg=mesg, ier=ier)
 
-    # check for errors
-    if ier in [1, 2, 3, 4]:
-        print("""modsim.py: scipy.optimize.leastsq ran successfully
-                 and returned the following message:\n""" + mesg)
-    else:
-        logging.error("""modsim.py: When I ran scipy.optimize.leastsq, something
-                         went wrong, and I got the following message:""")
-        raise Exception(mesg)
-
-    # return the best parameters
+    # if we got a Params object, we should return a Params object
     if isinstance(params, Params):
-        # if we got a Params object, we should return a Params object
         best_params = Params(Series(best_params, params.index))
-    return best_params
+
+    # return the best parameters and details
+    return best_params, details
 
 
 def min_bounded(min_func, bounds, *args, **options):
     """Finds the input value that minimizes `min_func`.
+
+    Wrapper for https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.minimize_scalar.html
 
     min_func: computes the function to be minimized
     bounds: sequence of two values, lower and upper bounds of the
@@ -227,41 +223,41 @@ def min_bounded(min_func, bounds, *args, **options):
     args: any additional positional arguments are passed to min_func
     options: any keyword arguments are passed as options to minimize_scalar
 
-    returns: OptimizeResult object
-             (see https://docs.scipy.org/doc/scipy/
-                  reference/generated/scipy.optimize.minimize_scalar.html)
+    returns: ModSimSeries object
     """
-    try:
-        midpoint = np.mean(bounds)
-        min_func(midpoint, *args)
-    except Exception as e:
-        msg = """Before running scipy.integrate.odeint, I tried
-                 running the slope function you provided with the
-                 initial conditions in system and t=0, and I got
-                 the following error:"""
-        logger.error(msg)
-        raise(e)
+    # try:
+    #     print(bounds[0])
+    #     min_func(bounds[0], *args)
+    # except Exception as e:
+    #     msg = """Before running scipy.integrate.min_bounded, I tried
+    #              running the slope function you provided with the
+    #              initial conditions in system and t=0, and I got
+    #              the following error:"""
+    #     logger.error(msg)
+    #     raise(e)
 
     underride(options, xatol=1e-3)
 
-    #TODO: do we need to turn units off?
-    res = minimize_scalar(min_func,
-                          bracket=bounds,
-                          bounds=bounds,
-                          args=args,
-                          method='bounded',
-                          options=options)
+    with units_off():
+        res = minimize_scalar(min_func,
+                              bracket=bounds,
+                              bounds=bounds,
+                              args=args,
+                              method='bounded',
+                              options=options)
 
     if not res.success:
         msg = """scipy.optimize.minimize_scalar did not succeed.
-                 The message it returns is %s""" % res.message
+                 The message it returned is %s""" % res.message
         raise Exception(msg)
 
-    return res
+    return ModSimSeries(res)
 
 
 def max_bounded(max_func, bounds, *args, **options):
     """Finds the input value that maximizes `max_func`.
+
+    Wrapper for https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.minimize_scalar.html
 
     min_func: computes the function to be maximized
     bounds: sequence of two values, lower and upper bounds of the
@@ -269,9 +265,7 @@ def max_bounded(max_func, bounds, *args, **options):
     args: any additional positional arguments are passed to max_func
     options: any keyword arguments are passed as options to minimize_scalar
 
-    returns: OptimizeResult object
-             (see https://docs.scipy.org/doc/scipy/
-                  reference/generated/scipy.optimize.minimize_scalar.html)
+    returns: ModSimSeries object
     """
     def min_func(*args):
         return -max_func(*args)
@@ -374,15 +368,15 @@ def run_ode_solver(system, slope_func, **options):
     t_0 =  getattr(system, 't_0', 0)
 
     # try running the slope function with the initial conditions
-    try:
-        slope_func(init, t_0, system)
-    except Exception as e:
-        msg = """Before running scipy.integrate.solve_ivp, I tried
-                 running the slope function you provided with the
-                 initial conditions in `system` and `t=t_0` and I got
-                 the following error:"""
-        logger.error(msg)
-        raise(e)
+    # try:
+    #     slope_func(init, t_0, system)
+    # except Exception as e:
+    #     msg = """Before running scipy.integrate.solve_ivp, I tried
+    #              running the slope function you provided with the
+    #              initial conditions in `system` and `t=t_0` and I got
+    #              the following error:"""
+    #     logger.error(msg)
+    #     raise(e)
 
     # wrap the slope function to reverse the arguments and add `system`
     f = lambda t, y: slope_func(y, t, system)
@@ -423,9 +417,6 @@ def run_ode_solver(system, slope_func, **options):
     y = bunch.pop('y')
     t = bunch.pop('t')
     details = ModSimSeries(bunch)
-
-    # print the status message
-    print(details.message)
 
     # pack the results into a TimeFrame
     results = TimeFrame(np.transpose(y), index=t, columns=init.index)
@@ -573,8 +564,58 @@ def plot(*args, **options):
     options are the same as for pyplot.plot
     """
     underride(options, linewidth=3, alpha=0.6)
-    lines = plt.plot(*args, **options)
-    # TODO: think about whether to return `lines`
+    with units_off():
+        lines = plt.plot(*args, **options)
+
+    return lines
+
+REPLOT_CACHE = {}
+
+def replot(*args, **options):
+    """
+    """
+    try:
+        label = options['label']
+    except KeyError:
+        raise ValueError('To use replot, you must provide a label argument.')
+
+    axes = plt.gca()
+    key = (axes, label)
+
+    if key not in REPLOT_CACHE:
+        lines = plot(*args, **options)
+        if len(lines) != 1:
+            raise ValueError('Replot only works with a single plotted element.')
+        REPLOT_CACHE[key] = lines[0]
+        return lines
+
+    line = REPLOT_CACHE[key]
+    x, y, style = parse_plot_args(*args, **options)
+    line.set_xdata(x)
+    line.set_ydata(y)
+
+def parse_plot_args(*args, **options):
+    """Parse the args the same way plt.plot does."""
+    x = None
+    y = None
+    style = None
+
+    if len(args) == 1:
+        y = args[0]
+    elif len(args) == 2:
+        if isinstance(args[1], str):
+            y, style = args
+        else:
+            x, y = args
+    elif len(args) == 3:
+        x, y, style = args
+
+    # check if style is provided as a kwarg; if so,
+    # it can clobber a positional style argument
+    if 'style' in options:
+        style = options['style']
+
+    return x, y, style
 
 
 def contour(df, **options):
@@ -736,7 +777,7 @@ class ModSimSeries(pd.Series):
         See: https://github.com/pandas-dev/pandas/issues/16737
         """
         if args or kwargs:
-            #underride(options, dtype=np.float64)
+            underride(kwargs, copy=True)
             super().__init__(*args, **kwargs)
         else:
             super().__init__([], dtype=np.float64)
@@ -746,15 +787,15 @@ class ModSimSeries(pd.Series):
 
         Mostly used for Jupyter notebooks.
         """
-        df = pd.DataFrame(self, columns=['values'])
+        df = pd.DataFrame(self.values, index=self.index, columns=['values'])
         return df._repr_html_()
 
-    def set(self, **options):
+    def set(self, **kwargs):
         """Uses keyword arguments to update the Series in place.
 
         Example: series.set(a=1, b=2)
         """
-        for name, value in options.items():
+        for name, value in kwargs.items():
             self[name] = value
 
     @property
@@ -796,6 +837,11 @@ def get_last_value(series):
     """Returns the value of the first element."""
     return series.values[-1]
 
+def gradient(series):
+    """Computes the numerical derivative of a series."""
+    a = np.gradient(series, series.index)
+    return TimeSeries(a, series.index)
+
 
 class TimeSeries(ModSimSeries):
     """Represents a mapping from times to values."""
@@ -818,14 +864,15 @@ class System(ModSimSeries):
 
         If there are no positional arguments, use kwargs.
 
-        If there is one positional argument, copy it.
+        If there is one positional argument, copy it and add
+        in the kwargs.
 
         More than one positional argument is an error.
         """
         if len(args) == 0:
             super().__init__(list(kwargs.values()), index=kwargs)
         elif len(args) == 1:
-            super().__init__(*args)
+            super().__init__(*args, copy=True)
             self.set(**kwargs)
         else:
             msg = '__init__() takes at most one positional argument'
