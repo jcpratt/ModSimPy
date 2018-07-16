@@ -9,6 +9,8 @@ License: https://creativecommons.org/licenses/by/4.0)
 import logging
 logger = logging.getLogger(name='modsim.py')
 
+#TODO: Make this Python 3.7 when conda is ready
+
 # make sure we have Python 3.6 or better
 import sys
 if sys.version_info < (3, 6):
@@ -179,27 +181,52 @@ def linrange(start=0, stop=None, step=1, **options):
     return array
 
 
+def magnitude(x):
+    """Returns the magnitude of a Quantity or number.
 
-def fit_leastsq(error_func, params, data, **options):
+    x: Quantity or number
+
+    returns: number
+    """
+    return x.magnitude if isinstance(x, Quantity) else x
+
+
+def require_units(x, units):
+    """Apply units to `x`, if necessary.
+
+    x: Quantity or number
+    units: Pint Units object
+
+    returns: Quantity
+    """
+    if isinstance(x, Quantity):
+        return x.to(units)
+    else:
+        return Quantity(x, units)
+
+
+def fit_leastsq(error_func, params, *args, **options):
     """Find the parameters that yield the best fit for the data.
 
     `params` can be a sequence, array, or Series
+
+    Whatever arguments are provided are passed along to `error_func`
 
     error_func: function that computes a sequence of errors
     params: initial guess for the best parameters
     data: the data to be fit; will be passed to min_fun
     options: any other arguments are passed to leastsq
     """
-    # to pass `data` to `leastsq`, we have to put it in a tuple
-    args = (data,)
+    # if any of the params are quantities, strip the units
+    x0 = [magnitude(x) for x in params]
 
     # override `full_output` so we get a message if something goes wrong
     options['full_output'] = True
 
     # run leastsq
-    #TODO: do we need to turn units off?
-    best_params, cov_x, infodict, mesg, ier = leastsq(error_func, x0=params,
-                                           args=args, **options)
+    with units_off():
+        best_params, cov_x, infodict, mesg, ier = leastsq(error_func,
+                                         x0=x0, args=args, **options)
 
     details = ModSimSeries(infodict)
     details.set(cov_x=cov_x, mesg=mesg, ier=ier)
@@ -401,17 +428,11 @@ def run_ode_solver(system, slope_func, **options):
     # remove dimensions from the initial conditions.
     # we need this because otherwise `init` gets copied into the
     # results array along with its units
-    init_no_dim = [getattr(x, 'magnitude', x) for x in init]
-
-    # if the user did not provide t_eval or events, return
-    # equally spaced points
-    if 't_eval' not in options:
-        if not events:
-            options['t_eval'] = linspace(t_0, t_end, 51)
+    y_0 = [magnitude(x) for x in init]
 
     # run the solver
     with units_off():
-        bunch = solve_ivp(f, [t_0, t_end], init_no_dim, events=events, **options)
+        bunch = solve_ivp(f, [t_0, t_end], y_0, events=events, **options)
 
     # separate the results from the details
     y = bunch.pop('y')
@@ -496,7 +517,13 @@ def interpolate(series, **options):
     underride(options, fill_value='extrapolate')
 
     # call interp1d, which returns a new function object
-    return interp1d(series.index, series.values, **options)
+    interp_func = interp1d(series.index, series.values, **options)
+
+    units = getattr(series, 'units', None)
+    if units:
+        return lambda x: Quantity(interp_func(x), units)
+    else:
+        return interp_func
 
 
 def interp_inverse(series, **options):
@@ -1119,7 +1146,7 @@ def Vector(*args, units=None):
 
     if found_units:
         # if there are units, remove them
-        args = [getattr(elt, 'magnitude', elt) for elt in args]
+        args = [magnitude(elt) for elt in args]
 
     # if the units keyword is provided, it overrides the units in args
     if units is not None:
